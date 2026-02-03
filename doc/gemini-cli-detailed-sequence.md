@@ -338,116 +338,113 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant Caller as 调用者(nonInteractiveCli.ts:395)
-    participant Scheduler as 调度器(Scheduler类)
-    participant StateMgr as 状态管理(SchedulerStateManager)
-    participant ToolRegistry as 工具注册表(ToolRegistry)
-    participant Policy as 策略检查(checkPolicy)
-    participant Confirmation as 确认处理(resolveConfirmation)
-    participant ToolExecutor as 工具执行器(ToolExecutor)
+  participant Caller as "调用者 (nonInteractiveCli.ts:395)"
+  participant Scheduler as "调度器 (Scheduler类)"
+  participant StateMgr as "状态管理 (SchedulerStateManager)"
+  participant ToolRegistry as "工具注册表 (ToolRegistry)"
+  participant Policy as "策略检查 (checkPolicy)"
+  participant Confirmation as "确认处理 (resolveConfirmation)"
+  participant ToolExecutor as "工具执行器 (ToolExecutor)"
 
-    Caller->>Scheduler: schedule(toolCallRequests, signal) (scheduler.ts:141)
+  Caller->>Scheduler: "schedule(toolCallRequests, signal) (scheduler.ts:141)"
 
-    alt 正在处理或已有活动调用
-        Scheduler->>Scheduler: _enqueueRequest() (scheduler.ts:160)
-        Note over Scheduler: 将请求加入队列等待
-    else 空闲状态
-        Scheduler->>Scheduler: _startBatch(requests, signal) (scheduler.ts:231)
+  alt 正在处理或已有活动调用
+    Scheduler->>Scheduler: "_enqueueRequest() (scheduler.ts:160)"
+    Note over Scheduler: 将请求加入队列等待
+  else 空闲状态
+    Scheduler->>Scheduler: "_startBatch(requests, signal) (scheduler.ts:231)"
+  end
+
+  Note over Scheduler,StateMgr: 阶段1：摄入和解析
+  Scheduler->>Scheduler: 清理批次状态 (scheduler.ts:237)
+
+  loop 每个工具调用请求
+    Scheduler->>ToolRegistry: "getTool(request.name) (scheduler.ts:247)"
+    alt 工具未找到
+      Scheduler->>Scheduler: "创建错误响应 (scheduler.ts:250-254)"
+    else 工具存在
+      Scheduler->>Scheduler: "_validateAndCreateToolCall() (scheduler.ts:287)"
+      Scheduler->>Scheduler: "tool.build(request.args) (scheduler.ts:299)"
+    end
+  end
+
+  Scheduler->>StateMgr: "enqueue(newCalls) (scheduler.ts:259)"
+
+  Note over Scheduler,StateMgr: 阶段2：处理循环
+  Scheduler->>Scheduler: "_processQueue(signal) (scheduler.ts:328)"
+
+  loop 处理队列中的项目
+    Scheduler->>Scheduler: "_processNextItem(signal) (scheduler.ts:339)"
+
+    break 信号已中止或取消
+      Scheduler->>StateMgr: "cancelAllQueued() (scheduler.ts:341)"
     end
 
-    Note over Scheduler,StateMgr: 阶段1：摄入和解析
-    Scheduler->>Scheduler: 清理批次状态 (scheduler.ts:237)
-
-    loop 每个工具调用请求
-        Scheduler->>ToolRegistry: getTool(request.name) (scheduler.ts:247)
-        alt 工具未找到
-            Scheduler->>Scheduler: 创建错误响应 (scheduler.ts:250-254)
-        else 工具存在
-            Scheduler->>Scheduler: _validateAndCreateToolCall() (scheduler.ts:287)
-            Scheduler->>Scheduler: tool.build(request.args) (scheduler.ts:299)
-        end
+    alt 无活动调用
+      Scheduler->>StateMgr: "dequeue() (scheduler.ts:346)"
+      alt 状态为错误
+        Scheduler->>StateMgr: "updateStatus(error) (scheduler.ts:350)"
+        Scheduler->>StateMgr: "finalizeCall() (scheduler.ts:351)"
+      end
     end
 
-    Scheduler->>StateMgr: enqueue(newCalls) (scheduler.ts:259)
+    Note over Scheduler,Policy: 阶段3：单个调用编排
+    alt 有活动调用且状态为 validating
+      Scheduler->>Scheduler: "_processValidatingCall(active, signal) (scheduler.ts:360)"
+      Scheduler->>Scheduler: "_processToolCall(active, signal) (scheduler.ts:371)"
 
-    Note over Scheduler,StateMgr: 阶段2：处理循环
-    Scheduler->>Scheduler: _processQueue(signal) (scheduler.ts:328)
+      Note over Scheduler,Policy: 步骤1：策略和安全检查
+      Scheduler->>Policy: "checkPolicy(toolCall, config) (scheduler.ts:407)"
+      Policy-->>Scheduler: 返回 {decision, rule}
 
-    loop 处理队列中的项目
-        Scheduler->>Scheduler: _processNextItem(signal) (scheduler.ts:339)
+      break 决策为 DENY
+        Scheduler->>Scheduler: "getPolicyDenialError() (scheduler.ts:410)"
+        Scheduler->>StateMgr: "updateStatus(error) (scheduler.ts:415)"
+        Scheduler->>StateMgr: "finalizeCall() (scheduler.ts:424)"
+      end
 
-        alt 信号已中止或取消
-            Scheduler->>StateMgr: cancelAllQueued() (scheduler.ts:341)
-            break
-        end
+      Note over Scheduler,Confirmation: 步骤2：用户确认循环
+      alt 决策: ASK_USER
+        Scheduler->>Confirmation: "resolveConfirmation() (scheduler.ts:433)"
+        Confirmation-->>Scheduler: 返回 {outcome, lastDetails}
+      else 决策: APPROVE
+        Note over Scheduler: 自动设置 outcome = ProceedOnce
+        Scheduler->>StateMgr: "setOutcome(ProceedOnce) (scheduler.ts:444)"
+      end
 
-        alt 无活动调用
-            Scheduler->>StateMgr: dequeue() (scheduler.ts:346)
-            alt 状态为错误
-                Scheduler Scheduler->>StateMgr: updateStatus(error) (scheduler.ts:350)
-                Scheduler->>StateMgr: finalizeCall() (scheduler.ts:351)
-            end
-        end
+      Note over Scheduler: 步骤3：策略更新
+      Scheduler->>Scheduler: "updatePolicy() (scheduler.ts:448)"
 
-        Note over Scheduler,Policy: 阶段3：单个调用编排
-        alt 有活动调用且状态为 validating
-            Scheduler->>Scheduler: _processValidatingCall(active, signal) (scheduler.ts:360)
-            Scheduler->>Scheduler: _processToolCall(active, signal) (scheduler.ts:371)
+      break 用户取消
+        Scheduler->>StateMgr: "updateStatus(cancelled) (scheduler.ts:455)"
+        Scheduler->>StateMgr: "finalizeCall() (scheduler.ts:456)"
+        Scheduler->>StateMgr: "cancelAllQueued() (scheduler.ts:457)"
+      end
 
-            Note over Scheduler,Policy: 步骤1：策略和安全检查
-            Scheduler->>Policy: checkPolicy(toolCall, config) (scheduler.ts:407)
-            Policy-->>Scheduler: 返回 {decision, rule}
+      Note over Scheduler,ToolExecutor: 步骤4：执行
+      Scheduler->>Scheduler: "_execute(callId, signal) (scheduler.ts:462)"
+      Scheduler->>StateMgr: "updateStatus(scheduled) (scheduler.ts:471)"
+      Scheduler->>StateMgr: "updateStatus(executing) (scheduler.ts:473)"
 
-            alt 决策: DENY
-                Scheduler->>Scheduler: getPolicyDenialError() (scheduler.ts:410)
-                Scheduler->>StateMgr: updateStatus(error) (scheduler.ts:415)
-                Scheduler->>StateMgr: finalizeCall() (scheduler.ts:424)
-                break
-            end
+      Scheduler->>ToolExecutor: "execute({call, signal, outputUpdateHandler}) (scheduler.ts:484)"
+      ToolExecutor->>ToolExecutor: 实际执行工具逻辑
+      ToolExecutor-->>Scheduler: 返回执行结果
 
-            Note over Scheduler,Confirmation: 步骤2：用户确认循环
-            alt 决策: ASK_USER
-                Scheduler->>Confirmation: resolveConfirmation() (scheduler.ts:433)
-                Confirmation-->>Scheduler: 返回 {outcome, lastDetails}
-            else 决策: APPROVE
-                Note over Scheduler: 自动设置 outcome = ProceedOnce
-                Scheduler->>StateMgr: setOutcome(ProceedOnce) (scheduler.ts:444)
-            end
-
-            Note over Scheduler: 步骤3：策略更新
-            Scheduler->>Scheduler: updatePolicy() (scheduler.ts:448)
-
-            alt 用户取消
-                Scheduler->>StateMgr: updateStatus(cancelled) (scheduler.ts:455)
-                Scheduler->>StateMgr: finalizeCall() (scheduler.ts:456)
-                Scheduler->>StateMgr: cancelAllQueued() (scheduler.ts:457)
-                break
-            end
-
-            Note over Scheduler,ToolExecutor: 步骤4：执行
-            Scheduler->>Scheduler: _execute(callId, signal) (scheduler.ts:462)
-            Scheduler->>StateMgr: updateStatus(scheduled) (scheduler.ts:471)
-            Scheduler->>StateMgr: updateStatus(executing) (scheduler.ts:473)
-
-            Scheduler->>ToolExecutor: execute({call, signal, outputUpdateHandler}) (scheduler.ts:484)
-            ToolExecutor->>ToolExecutor: 实际执行工具逻辑
-            ToolExecutor-->>Scheduler: 返回执行结果
-
-            alt 结果成功
-                Scheduler->>StateMgr: updateStatus(success) (scheduler.ts:500)
-            else 结果取消
-                Scheduler->>StateMgr: updateStatus(cancelled) (scheduler.ts:502)
-            else 其他错误
-                Scheduler->>StateMgr: updateStatus(error) (scheduler.ts:504)
-            end
-        end
+      alt 结果成功
+        Scheduler->>StateMgr: "updateStatus(success) (scheduler.ts:500)"
+      else 结果取消
+        Scheduler->>StateMgr: "updateStatus(cancelled) (scheduler.ts:502) "
+      else 其他错误
+        Scheduler->>StateMgr: "updateStatus(error) (scheduler.ts:504)"
+      end
     end
+  end
 
-    Note over Scheduler: 处理请求队列中的下一批
-    Scheduler->>Scheduler: _processNextInRequestQueue() (scheduler.ts:508)
+  Note over Scheduler: 处理请求队列中的下一批
+  Scheduler->>Scheduler: "_processNextInRequestQueue() (scheduler.ts:508)"
 
-    Scheduler->>StateMgr: 获取 completedBatch
-    StateMgr-->>Caller: 返回 completedToolCalls[] (scheduler.ts:261)
+  Scheduler->>StateMgr: 获取 completedBatch
+  StateMgr-->>Caller: "返回 completedToolCalls[] (scheduler.ts:261)"
 ```
 
 ## Agent 执行详细序列
@@ -456,109 +453,107 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant Caller as 调用者
-    participant AgentExec as LocalAgentExecutor.create
-    participant ToolRegistry as 工具注册表
-    participant GeminiChat as GeminiChat实例
-    participant Agent as LocalAgentExecutor实例
+  participant Caller as 调用者
+  participant AgentExec as LocalAgentExecutor.create
+  participant ToolRegistry as 工具注册表
+  participant GeminiChat as GeminiChat实例
+  participant Agent as LocalAgentExecutor实例
 
-    Caller->>AgentExec: create(definition, runtimeContext, onActivity) (local-executor.ts:107)
+  Caller->>AgentExec: "create(definition, runtimeContext, onActivity) (local-executor.ts:107)"
 
-    Note over AgentExec,ToolRegistry: 第1步：创建独立工具注册表
-    AgentExec->>ToolRegistry: new ToolRegistry(runtimeContext) (local-executor.ts:113)
-    AgentExec->>ToolRegistry: 获取父工具注册表 (local-executor.ts:117)
-    AgentExec->>AgentExec: 获取所有Agent名称 (local-executor.ts:118-120)
+  Note over AgentExec,ToolRegistry: 第1步：创建独立工具注册表
+  AgentExec->>ToolRegistry: "new ToolRegistry(runtimeContext) (local-executor.ts:113)"
+  AgentExec->>ToolRegistry: 获取父工具注册表 (local-executor.ts:117)
+  AgentExec->>AgentExec: 获取所有Agent名称 (local-executor.ts:118-120)
 
-    Note over AgentExec,ToolRegistry: 第2步：注册工具
-    alt 有 toolConfig
-        loop 遍历 toolConfig.tools
-            AgentExec->>ToolRegistry: 根据名称注册工具 (local-executor.ts:149-161)
-        end
-    else 无 toolConfig
-        AgentExec->>ToolRegistry: 注册所有父工具 (local-executor.ts:164-167)
+  Note over AgentExec,ToolRegistry: 第2步：注册工具
+  alt 有 toolConfig
+    loop 遍历 toolConfig.tools
+      AgentExec->>ToolRegistry: 根据名称注册工具 (local-executor.ts:149-161)
+    end
+  else 无 toolConfig
+    AgentExec->>ToolRegistry: 注册所有父工具 (local-executor.ts:164-167)
+  end
+
+  AgentExec->>ToolRegistry: sortTools() (local-executor.ts:169)
+
+  Note over AgentExec,Agent: 第3步：创建Agent实例并运行
+  AgentExec->>Agent: "new LocalAgentExecutor(...) (local-executor.ts:194-214)"
+  Agent->>Agent: 设置 agentId (parentPrefix + name + random)
+
+  Caller->>Agent: "run(inputs, signal) (local-executor.ts:403)"
+
+  Note over Agent: 第4步：设置超时和初始化
+  Agent->>Agent: 设置超时控制器 (local-executor.ts:409-414)
+  Agent->>Agent: 合并 AbortSignal (local-executor.ts:417)
+  Agent->>Agent: 记录 AgentStartEvent (local-executor.ts:419-422)
+
+  Note over Agent,GeminiChat: 第5步：准备执行环境
+  Agent->>Agent: 准备增强输入参数 (local-executor.ts:428-433)
+  Agent->>Agent: prepareToolsList() (local-executor.ts:435)
+  Agent->>GeminiChat: createChatObject(inputs, tools) (local-executor.ts:436)
+  Agent->>Agent: 构建查询消息 (local-executor.ts:437-440)
+
+  Note over Agent,GeminiChat: 第6步：Agent执行循环
+  loop 主循环
+    break 达到终止条件
+      Agent->>Agent: 设置 terminateReason (local-executor.ts:446)
     end
 
-    AgentExec->>ToolRegistry: sortTools() (local-executor.ts:169)
-
-    Note over AgentExec,Agent: 第3步：创建Agent实例并运行
-    AgentExec->>Agent: new LocalAgentExecutor(...) (local-executor.ts:194-214)
-    Agent->>Agent: 设置 agentId (parentPrefix + name + random)
-
-    Caller->>Agent: run(inputs, signal) (local-executor.ts:403)
-
-    Note over Agent: 第4步：设置超时和初始化
-    Agent->>Agent: 设置超时控制器 (local-executor.ts:409-414)
-    Agent->>Agent: 合并 AbortSignal (local-executor.ts:417)
-    Agent->>Agent: 记录 AgentStartEvent (local-executor.ts:419-422)
-
-    Note over Agent,GeminiChat: 第5步：准备执行环境
-    Agent->>Agent: 准备增强输入参数 (local-executor.ts:428-433)
-    Agent->>Agent: prepareToolsList() (local-executor.ts:435)
-    Agent->>GeminiChat: createChatObject(inputs, tools) (local-executor.ts:436)
-    Agent->>Agent: 构建查询消息 (local-executor.ts:437-440)
-
-    Note over Agent,GeminiChat: 第6步：Agent执行循环
-    loop 主循环
-        Agent->>Agent: checkTermination() (local-executor.ts:444-448)
-        alt 达到终止条件
-            Agent->>Agent: 设置 terminateReason (local-executor.ts:446)
-            break
-        end
-
-        alt 信号已中止
-            Agent->>Agent: 设置 terminateReason (local-executor.ts:451-456)
-            break
-        end
-
-        Agent->>GeminiChat: executeTurn() (local-executor.ts:459-465)
-        GeminiChat->>GeminiChat: callModel() (local-executor.ts:234-236)
-
-        Note over Agent: 处理模型响应
-        alt 信号已中止
-            Agent->>Agent: 返回 stop 结果 (local-executor.ts:238-247)
-        end
-
-        alt 无函数调用 (协议违规)
-            Agent->>Agent: 返回 stop + ERROR (local-executor.ts:250-260)
-        end
-
-        Agent->>Agent: processFunctionCalls(functionCalls) (local-executor.ts:262-263)
-
-        alt 调用了 complete_task 工具
-            Agent->>Agent: 返回 stop + GOAL (local-executor.ts:264-271)
-        end
-
-        alt 状态为 continue
-            Agent->>Agent: 继续下一轮 (local-executor.ts:274-277)
-        else 状态为 stop
-            Agent->>Agent: 保存 terminateReason (local-executor.ts:468-472)
-            break
-        end
+    break 信号已中止
+      Agent->>Agent: 设置 terminateReason (local-executor.ts:451-456)
     end
 
-    Note over Agent: 第7步：统一恢复逻辑
-    alt 终止原因可恢复 (TIMEOUT/MAX_TURNS/ERROR_NO_COMPLETE_TASK)
-        Agent->>GeminiChat: executeFinalWarningTurn() (local-executor.ts:488-493)
+    Agent->>GeminiChat: executeTurn() (local-executor.ts:459-465)
+    GeminiChat->>GeminiChat: callModel() (local-executor.ts:234-236)
 
-        Note over Agent: 恢复轮执行（60秒宽限期）
-        Agent->>GeminiChat: 发送警告消息 (local-executor.ts:336-339)
-        Agent->>GeminiChat: executeTurn() (local-executor.ts:347-353)
-
-        alt 恢复成功 (调用了 complete_task)
-            Agent->>Agent: 设置 terminateReason = GOAL (local-executor.ts:359-364)
-        else 恢复失败
-            Agent->>Agent: 恢复失败处理 (local-executor.ts:368-372)
-        end
+    Note over Agent: 处理模型响应
+    alt 信号已中止
+      Agent->>Agent: 返回 stop 结果 (local-executor.ts:238-247)
     end
 
-    Note over Agent: 第8步：返回最终结果
-    alt 成功完成
-        Agent->>Agent: 返回 result + terminate_reason (local-executor.ts:530-534)
-    else 失败终止
-        Agent->>Agent: 返回 error result (local-executor.ts:536-540)
+    alt 无函数调用 (协议违规)
+      Agent->>Agent: 返回 stop + ERROR (local-executor.ts:250-260)
     end
 
-    Agent-->>Caller: 返回 OutputObject
+    Agent->>Agent: processFunctionCalls(functionCalls) (local-executor.ts:262-263)
+
+    alt 调用了 complete_task 工具
+      Agent->>Agent: 返回 stop + GOAL (local-executor.ts:264-271)
+    end
+
+    alt 状态为 continue
+      Agent->>Agent: 继续下一轮 (local-executor.ts:274-277)
+    else 状态为 stop
+      break 停止循环
+        Agent->>Agent: 保存 terminateReason (local-executor.ts:468-472)
+      end
+    end
+  end
+
+  Note over Agent: 第7步：统一恢复逻辑
+  alt "终止原因可恢复 (TIMEOUT/MAX_TURNS/ERROR_NO_COMPLETE_TASK)"
+    Agent->>GeminiChat: executeFinalWarningTurn() (local-executor.ts:488-493)
+
+    Note over Agent: 恢复轮执行（60秒宽限期）
+    Agent->>GeminiChat: 发送警告消息 (local-executor.ts:336-339)
+    Agent->>GeminiChat: executeTurn() (local-executor.ts:347-353)
+
+    alt 恢复成功 (调用了 complete_task)
+      Agent->>Agent: 设置 terminateReason = GOAL (local-executor.ts:359-364)
+    else 恢复失败
+      Agent->>Agent: 恢复失败处理 (local-executor.ts:368-372)
+    end
+  end
+
+  Note over Agent: 第8步：返回最终结果
+  alt 成功完成
+    Agent->>Agent: 返回 result + terminate_reason (local-executor.ts:530-534)
+  else 失败终止
+    Agent->>Agent: 返回 error result (local-executor.ts:536-540)
+  end
+
+  Agent-->>Caller: 返回 OutputObject
 ```
 
 ## 交互模式UI启动序列
